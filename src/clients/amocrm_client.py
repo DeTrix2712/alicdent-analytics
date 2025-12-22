@@ -5,7 +5,7 @@ import requests
 import pandas as pd
 from typing import Any, Iterable
 
-from src.config import AMOCRM_BASE_URL, AMOCRM_ACCESS_TOKEN, AMO_STATUS_MAP
+from src.config import AMOCRM_BASE_URL, AMOCRM_TOKEN, AMOCRM_PIPELINE_ID
 from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -22,12 +22,12 @@ class AmoCRMClient:
     """
 
     def __init__(self) -> None:
-        if not AMOCRM_BASE_URL or not AMOCRM_ACCESS_TOKEN:
+        if not AMOCRM_BASE_URL or not AMOCRM_TOKEN:
             logger.warning(
                 "AmoCRM credentials are not set; client will not work against real API."
             )
         self.base_url = AMOCRM_BASE_URL.rstrip("/") if AMOCRM_BASE_URL else ""
-        self.token = AMOCRM_ACCESS_TOKEN
+        self.token = AMOCRM_TOKEN
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -36,22 +36,54 @@ class AmoCRMClient:
         }
 
     # === НИЗКОУРОВНЕВЫЙ GET ===
+
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         if not self.base_url:
             raise RuntimeError("AMOCRM_BASE_URL not configured")
+
         url = f"{self.base_url}{path}"
         resp = requests.get(url, headers=self._headers(), params=params or {})
-        resp.raise_for_status()
-        return resp.json()
+
+        # Если не 2xx — покажем тело ответа (часто HTML с ошибкой/авторизацией)
+        if not resp.ok:
+            preview = (resp.text or "")[:800]
+            raise RuntimeError(
+                f"AmoCRM GET {url} failed: {resp.status_code}\n"
+                f"Response preview:\n{preview}"
+            )
+
+        # Если 2xx, но пришло не JSON — тоже покажем превью
+        try:
+            return resp.json()
+        except ValueError:
+            preview = (resp.text or "")[:800]
+            raise RuntimeError(
+                f"AmoCRM GET {url} returned non-JSON body (status {resp.status_code}).\n"
+                f"Response preview:\n{preview}"
+            )
 
     # === СЫРЬЁ ИЗ API ===
 
-    def fetch_leads_raw(self, limit: int = 250) -> list[dict[str, Any]]:
+    def fetch_leads_raw(
+        self,
+        limit: int = 250,
+        pipeline_id: int | None = None,
+    ) -> list[dict[str, Any]]:
         """
-        Сырой список сделок из AmoCRM.
+        Сырой список сделок из AmoCRM (только из нужной воронки).
         TODO: добавить фильтры updated_at, пагинацию.
         """
-        data = self._get("/api/v4/leads", params={"limit": limit})
+        pid = pipeline_id or AMOCRM_PIPELINE_ID
+        if not pid:
+            raise RuntimeError("AMOCRM_PIPELINE_ID is not set (set it in .env)")
+
+        data = self._get(
+            "/api/v4/leads",
+            params={
+                "limit": limit,
+                "filter[pipeline_id]": pid,
+            },
+        )
         return data.get("_embedded", {}).get("leads", [])
 
     def fetch_status_history_raw(self, lead_id: int) -> list[dict[str, Any]]:
@@ -78,24 +110,33 @@ class AmoCRMClient:
             # TODO: достать правильные поля и кастомные поля (UTM, телефон, теги).
             row = {
                 "lead_id": item.get("id"),
-                "contact_id": None,  # нужно будет вытащить из _embedded['contacts'] или доп. запросов
-                "phone_normalized": None,  # нормализуем из телефона контакта через utils.phone
+                "contact_id": None,
+                "phone_normalized": None,
                 "created_at": item.get("created_at"),
+                "updated_at": item.get("updated_at"),
                 "current_status_id": item.get("status_id"),
-                "current_status_name": AMO_STATUS_MAP.get(item.get("status_id")),
+                "current_status_name": None,
+                "pipeline_id": item.get("pipeline_id"),
                 "responsible_user_id": item.get("responsible_user_id"),
-                # UTM нужно доставать из custom_fields_values
-                "utm_source": None,
-                "utm_medium": None,
-                "utm_campaign": None,
-                "utm_content": None,
-                "utm_term": None,
-                "lead_source_tag": None,
-                "dt_new": None,
-                "dt_qualified": None,
-                "dt_booked": None,
-                "dt_visited": None,
-                "dt_second_payment": None,
+                # === Маркетинг (вводится вручную в AmoCRM) ===
+                "traffic_source": None,  # напр. "Инстаграм", "2ГИС", "Сайт", ...
+                "creative_key": None,  # ваш "креатив/реклама" (лучше хранить ad_id или внутренний ключ)
+                # === Запись / визит (по скрину из сделки) ===
+                "budget": None,  # Бюджет
+                "appointment_status": None,  # Статус записи
+                "doctor_name": None,  # ФИО врача
+                "appointment_datetime": None,  # Дата и время приёма
+                "appointment_created_at": None,  # Дата и время создания (записи)
+                "appointment_creator_name": None,  # ФИО создавшего запись
+                "visit_type": None,  # Тип приёма (первичный/повторный)
+                "services_codes": None,  # Коды оказанных услуг (если это поле в Amo)
+                "services_amount": None,  # Сумма оказанных услуг
+                "amount_received": None,  # Фактически получен
+                "discount": None,  # Скидка
+                "branch": None,  # Филиал
+                # === Коммуникации ===
+                "topic": None,  # Тема обращения
+                "call_result": None,  # Результат звонка
             }
             rows.append(row)
 

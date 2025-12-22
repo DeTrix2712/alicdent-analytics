@@ -20,6 +20,7 @@ from src.etl.transform import (
     standardize_appointments,
     standardize_payments,
 )
+from src.etl.amo_debug import amo_smoke_test
 
 
 logger = get_logger(__name__)
@@ -56,4 +57,5 @@ def run_mock_etl():
 
 
 if __name__ == "__main__":
-    run_mock_etl()
+    amo_smoke_test(limit=10)
+    # run_mock_etl()

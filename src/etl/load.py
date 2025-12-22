@@ -12,6 +12,9 @@ OUTPUT_DIR.mkdir(exist_ok=True)
 
 
 def save_table(df: pd.DataFrame, name: str):
+    if df is None or df.empty:
+        logger.info(f"Table {name} is empty. Skipping save.")
+        return
     path = OUTPUT_DIR / f"{name}.csv"
     df.to_csv(path, index=False)
     logger.info("Saved table %s to %s", name, path)
